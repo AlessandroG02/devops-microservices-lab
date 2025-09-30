@@ -1,0 +1,131 @@
+version: '3.8'
+
+services:
+  # MongoDB Database
+  mongodb:
+    image: mongo:latest
+    container_name: expenses-mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - expenses-network
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # RabbitMQ Message Queue
+  rabbitmq:
+    image: rabbitmq:management-alpine
+    container_name: expenses-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - expenses-network
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Backend API
+  backend:
+    build:
+      context: ./packages/backend
+      dockerfile: Dockerfile
+    container_name: expenses-backend
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: 3000
+      MONGO_URI: mongodb://mongodb:27017/expenses_db
+      RABBITMQ_URL: amqp://rabbitmq
+      RABBITMQ_VHOST: /
+      RABBITMQ_EXCHANGE: expenses_exchange
+      UPLOAD_PATH: ./uploads
+      JWT_SECRET: expenses-secret-key-change-in-production
+    volumes:
+      - backend_uploads:/app/uploads
+    networks:
+      - expenses-network
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Frontend Web App
+  frontend:
+    build:
+      context: ./packages/frontend
+      dockerfile: Dockerfile
+    container_name: expenses-frontend
+    ports:
+      - "3030:80"
+    networks:
+      - expenses-network
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # Message Processor
+  processor:
+    build:
+      context: ./packages/processor
+      dockerfile: Dockerfile
+    container_name: expenses-processor
+    environment:
+      RABBITMQ_URL: amqp://rabbitmq
+      RABBITMQ_VHOST: /
+      RABBITMQ_EXCHANGE: expenses_exchange
+      OUTPUT_FOLDER: /app/messages
+    volumes:
+      - processor_messages:/app/messages
+    networks:
+      - expenses-network
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Lake Publisher (eseguito manualmente o come CronJob)
+  lakepublisher:
+    build:
+      context: ./packages/lakepublisher
+      dockerfile: Dockerfile
+    container_name: expenses-lakepublisher
+    environment:
+      API_BASE_URL: http://backend:3000
+      TARGET_STATUS: Approved
+      BASE_PATH: /app/data
+      API_TOKEN: lakepublisher-token-2024
+    volumes:
+      - lakepublisher_data:/app/data
+    networks:
+      - expenses-network
+    depends_on:
+      - backend
+    profiles:
+      - manual
+    restart: "no"
+
+volumes:
+  mongodb_data:
+  rabbitmq_data:
+  backend_uploads:
+  processor_messages:
+  lakepublisher_data:
+
+networks:
+  expenses-network:
+    driver: bridge
